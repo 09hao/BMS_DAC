@@ -1,39 +1,51 @@
-#ifndef MOVE_BMS_GAUGE_H
-#define MOVE_BMS_GAUGE_H
+#ifndef MOVEBMSGAUGE_H
+#define MOVEBMSGAUGE_H
 
 #include <Arduino.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEClient.h>
 
+#define DAC_PIN 25
+
+struct VehicleConfig
+{
+  const char* name;
+  uint8_t dacInit;
+  uint8_t dacMin;
+  uint8_t dacMax;
+  uint8_t socIndex;
+};
+
 class MoveBMSGauge
 {
 public:
-  MoveBMSGauge(BLEAddress address);
+  MoveBMSGauge();
 
-  void begin();
+  void begin(const char* vehicleName, const char* bmsAddr);
   void loop();
 
 private:
-  BLEAddress bmsAddr;
-
   BLEClient* pClient;
   BLERemoteCharacteristic* pChar;
 
-  bool connected;
+  const char* addr;
+  VehicleConfig vehicle;
+
+  BLEUUID serviceUUID;
+  BLEUUID charUUID;
+
+  bool loadVehicleConfig(const char* vehicleName);
+  bool connectBMS();
+  void outputDAC(uint8_t soc);
 
   static MoveBMSGauge* instance;
-
   static void notifyCallback(
     BLERemoteCharacteristic* c,
     uint8_t* data,
     size_t len,
     bool isNotify
   );
-
-  void handleData(uint8_t* data, size_t len);
-  bool connectBMS();
-  void outputDAC(uint8_t soc);
 };
 
 #endif

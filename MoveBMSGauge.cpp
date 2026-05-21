@@ -1,58 +1,99 @@
 #include "MoveBMSGauge.h"
 
-#define DAC_PIN 25
+MoveBMSGauge* MoveBMSGauge::instance = nullptr;
 
-BLEUUID serviceUUID("0000FFE0-0000-1000-8000-00805F9B34FB");
-BLEUUID charUUID("0000FFE1-0000-1000-8000-00805F9B34FB");
-
-uint8_t loginCmd[] = {
+uint8_t loginCmd[] =
+{
   0xA5, 0x0B, 0x00, 0x58, 0x58,
   0x19, 0x0A, 0x1E,
   0x0E, 0x28, 0x0D
 };
 
-MoveBMSGauge* MoveBMSGauge::instance = nullptr;
-
-MoveBMSGauge::MoveBMSGauge(BLEAddress address)
-  : bmsAddr(address),
-    pClient(nullptr),
+MoveBMSGauge::MoveBMSGauge()
+  : pClient(nullptr),
     pChar(nullptr),
-    connected(false)
+    addr(nullptr),
+    serviceUUID("0000FFE0-0000-1000-8000-00805F9B34FB"),
+    charUUID("0000FFE1-0000-1000-8000-00805F9B34FB")
 {
   instance = this;
 }
 
-void MoveBMSGauge::begin()
+bool MoveBMSGauge::loadVehicleConfig(const char* vehicleName)
 {
+  if (strcmp(vehicleName, "ISB") == 0)
+  {
+    vehicle.name = "ISB";
+    vehicle.dacInit = 130;
+    vehicle.dacMin = 127;
+    vehicle.dacMax = 155;
+    vehicle.socIndex = 11;
+    return true;
+  }
+
+  if (strcmp(vehicleName, "ATN") == 0)
+  {
+    vehicle.name = "ATN";
+    vehicle.dacInit = 50;
+    vehicle.dacMin = 62;
+    vehicle.dacMax = 72;
+    vehicle.socIndex = 11;
+    return true;
+  }
+
+  return false;
+}
+
+void MoveBMSGauge::begin(const char* vehicleName, const char* bmsAddr)
+{
+  Serial.begin(115200);
+  delay(1000);
+
+  Serial.println();
+  Serial.println("Move BMS Gauge");
+
+  addr = bmsAddr;
+
+  if (!loadVehicleConfig(vehicleName))
+  {
+    Serial.println("ERROR: Unknown vehicle");
+    Serial.println("Use: ISB or ATN");
+
+    while (1)
+    {
+      delay(1000);
+    }
+  }
+
+  Serial.print("Vehicle: ");
+  Serial.println(vehicle.name);
+
+  Serial.print("BMS Address: ");
+  Serial.println(addr);
+
+  Serial.print("DAC Init: ");
+  Serial.println(vehicle.dacInit);
+
+  Serial.print("DAC Min: ");
+  Serial.println(vehicle.dacMin);
+
+  Serial.print("DAC Max: ");
+  Serial.println(vehicle.dacMax);
+
   pinMode(DAC_PIN, OUTPUT);
-  dacWrite(DAC_PIN, 130);
+  dacWrite(DAC_PIN, vehicle.dacInit);
 
   BLEDevice::init("");
 
   connectBMS();
 }
 
-void MoveBMSGauge::loop()
-{
-  if (pClient && !pClient->isConnected())
-  {
-    connected = false;
-
-    Serial.println("Disconnected");
-
-    dacWrite(DAC_PIN, 130);
-
-    delay(2000);
-
-    connectBMS();
-  }
-
-  delay(1000);
-}
-
 bool MoveBMSGauge::connectBMS()
 {
-  Serial.println("Connecting...");
+  Serial.print("Connecting to BMS: ");
+  Serial.println(addr);
+
+  BLEAddress bmsAddr(addr);
 
   pClient = BLEDevice::createClient();
 
@@ -68,7 +109,7 @@ bool MoveBMSGauge::connectBMS()
 
   if (service == nullptr)
   {
-    Serial.println("No FFE0");
+    Serial.println("No FFE0 service");
     pClient->disconnect();
     return false;
   }
@@ -77,7 +118,7 @@ bool MoveBMSGauge::connectBMS()
 
   if (pChar == nullptr)
   {
-    Serial.println("No FFE1");
+    Serial.println("No FFE1 characteristic");
     pClient->disconnect();
     return false;
   }
@@ -86,14 +127,10 @@ bool MoveBMSGauge::connectBMS()
 
   delay(500);
 
-  Serial.println("Send Login");
-
+  Serial.println("Send login command");
   pChar->writeValue(loginCmd, sizeof(loginCmd), true);
 
-  connected = true;
-
   Serial.println("Ready");
-
   return true;
 }
 
@@ -104,36 +141,46 @@ void MoveBMSGauge::notifyCallback(
   bool isNotify
 )
 {
-  if (instance)
-  {
-    instance->handleData(data, len);
-  }
-}
+  if (instance == nullptr) return;
 
-void MoveBMSGauge::handleData(uint8_t* data, size_t len)
-{
-  if (len < 12) return;
-  if (data[0] != 0xA5) return;
+  if (len <= instance->vehicle.socIndex) return;
 
-  uint8_t soc = data[11];
+  uint8_t soc = data[instance->vehicle.socIndex];
 
-  soc = constrain(soc, 0, 100);
-
-  Serial.print("SOC=");
-  Serial.print(soc);
-  Serial.println("%");
-
-  outputDAC(soc);
+  instance->outputDAC(soc);
 }
 
 void MoveBMSGauge::outputDAC(uint8_t soc)
 {
-  int dacValue = map(soc, 0, 100, 127, 155);
+  soc = constrain(soc, 0, 100);
+
+  int dacValue = map(
+    soc,
+    0,
+    100,
+    vehicle.dacMin,
+    vehicle.dacMax
+  );
 
   dacWrite(DAC_PIN, dacValue);
 
-  Serial.print("DAC=");
+  Serial.print("SOC=");
+  Serial.print(soc);
+  Serial.print("%  DAC=");
   Serial.print(dacValue);
-  Serial.print(" V=");
+  Serial.print("  V=");
   Serial.println(dacValue * 3.3 / 255.0, 2);
+}
+
+void MoveBMSGauge::loop()
+{
+  if (pClient && !pClient->isConnected())
+  {
+    Serial.println("Disconnected");
+    delay(2000);
+
+    connectBMS();
+  }
+
+  delay(1000);
 }

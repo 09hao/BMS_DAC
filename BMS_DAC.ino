@@ -1,13 +1,14 @@
-#include "MoveBMSGauge.h"
+#include <MoveBMSGauge.h>
 
-BLEAddress addr("7a:b4:9d:68:07:f4");//THAY ĐỔI ĐỊA CHỈ VỚI MỖI CỤC PIN KHÁC NHAU
+MoveBMSGauge gauge;
 
-MoveBMSGauge gauge(addr);
+// Chỉ cần sửa 2 dòng này
+#define VEHICLE_NAME "ISB"
+#define BMS_ADDR     "7a:b4:9d:68:07:f4"
 
 void setup()
 {
-  Serial.begin(115200);
-  gauge.begin();
+  gauge.begin(VEHICLE_NAME, BMS_ADDR);
 }
 
 void loop()

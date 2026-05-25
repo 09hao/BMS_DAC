@@ -16,7 +16,14 @@ MoveBMSGauge::MoveBMSGauge()
     serviceUUID("0000FFE0-0000-1000-8000-00805F9B34FB"),
     charUUID("0000FFE1-0000-1000-8000-00805F9B34FB"),
     socFiltered(-1),
-    lastPacketTime(0)
+    lastPacketTime(0),
+    cellMinMV(0),
+    cellMaxMV(0),
+    cellDeltaMV(0),
+    detectedCellStart(0),
+    detectedCellCount(0),
+    cellWarn(false),
+    cellFault(false)
 {
   instance = this;
 }
@@ -26,45 +33,30 @@ bool MoveBMSGauge::loadVehicleConfig(const char* vehicleName)
   if (strcmp(vehicleName, "ISB") == 0)
   {
     vehicle.name = "ISB";
-
     vehicle.dacInit = 130;
-
     vehicle.dacMin = 127;
-
     vehicle.dacMax = 155;
-
     vehicle.socIndex = 11;
-
     return true;
   }
 
   if (strcmp(vehicleName, "ATN") == 0)
   {
     vehicle.name = "ATN";
-
     vehicle.dacInit = 50;
-
     vehicle.dacMin = 62;
-
     vehicle.dacMax = 72;
-
     vehicle.socIndex = 11;
-
     return true;
   }
 
   if (strcmp(vehicleName, "007") == 0)
   {
     vehicle.name = "007";
-
     vehicle.dacInit = 50;
-
     vehicle.dacMin = 59;
-
     vehicle.dacMax = 73;
-
     vehicle.socIndex = 11;
-
     return true;
   }
 
@@ -77,12 +69,10 @@ void MoveBMSGauge::begin(
 )
 {
   Serial.begin(115200);
-
   delay(1000);
 
   Serial.println();
-
-  Serial.println("Move BMS Gauge");
+  Serial.println("Move BMS Gauge + Auto Cell Count");
 
   addr = bmsAddr;
 
@@ -114,7 +104,6 @@ void MoveBMSGauge::begin(
 bool MoveBMSGauge::connectBMS()
 {
   Serial.print("Connecting to BMS: ");
-
   Serial.println(addr);
 
   BLEAddress bmsAddr(addr);
@@ -124,7 +113,6 @@ bool MoveBMSGauge::connectBMS()
   if (!pClient->connect(bmsAddr))
   {
     Serial.println("Connect fail");
-
     return false;
   }
 
@@ -136,9 +124,7 @@ bool MoveBMSGauge::connectBMS()
   if (service == nullptr)
   {
     Serial.println("No FFE0 service");
-
     pClient->disconnect();
-
     return false;
   }
 
@@ -148,9 +134,7 @@ bool MoveBMSGauge::connectBMS()
   if (pChar == nullptr)
   {
     Serial.println("No FFE1 characteristic");
-
     pClient->disconnect();
-
     return false;
   }
 
@@ -173,6 +157,209 @@ bool MoveBMSGauge::connectBMS()
   return true;
 }
 
+void MoveBMSGauge::printRawPacket(uint8_t* data, size_t len)
+{
+#if DEBUG_RAW_PACKET
+  Serial.print("LEN=");
+  Serial.print(len);
+  Serial.print(" DATA=");
+
+  for (size_t i = 0; i < len; i++)
+  {
+    Serial.printf("%02X ", data[i]);
+  }
+
+  Serial.println();
+#endif
+}
+
+bool MoveBMSGauge::autoDetectCells(uint8_t* data, size_t len)
+{
+  uint8_t bestStart = 0;
+  uint8_t bestCount = 0;
+  uint16_t bestDelta = 65535;
+
+  for (uint8_t start = 0; start + 1 < len; start++)
+  {
+    uint8_t count = 0;
+    uint16_t minMV = 5000;
+    uint16_t maxMV = 0;
+
+    for (uint8_t i = 0; i < MAX_CELL_COUNT; i++)
+    {
+      uint16_t index = start + i * 2;
+
+      if (index + 1 >= len)
+      {
+        break;
+      }
+
+      // BMS gửi little-endian: D5 0C = 0x0CD5 = 3285mV
+      uint16_t mv =
+        ((uint16_t)data[index + 1] << 8) |
+        data[index];
+
+      if (
+        mv >= CELL_MIN_VALID_MV &&
+        mv <= CELL_MAX_VALID_MV
+      )
+      {
+        count++;
+
+        if (mv < minMV)
+        {
+          minMV = mv;
+        }
+
+        if (mv > maxMV)
+        {
+          maxMV = mv;
+        }
+      }
+      else
+      {
+        break;
+      }
+    }
+
+    if (count >= MIN_CELL_COUNT)
+    {
+      uint16_t delta = maxMV - minMV;
+
+      if (
+        count > bestCount ||
+        (count == bestCount && delta < bestDelta)
+      )
+      {
+        bestStart = start;
+        bestCount = count;
+        bestDelta = delta;
+      }
+    }
+  }
+
+  if (bestCount < MIN_CELL_COUNT)
+  {
+    detectedCellStart = 0;
+    detectedCellCount = 0;
+
+    return false;
+  }
+
+  detectedCellStart = bestStart;
+  detectedCellCount = bestCount;
+
+  return true;
+}
+
+bool MoveBMSGauge::readDetectedCells(uint8_t* data, size_t len)
+{
+  if (detectedCellCount == 0)
+  {
+    return false;
+  }
+
+  if (
+    detectedCellStart + detectedCellCount * 2 > len
+  )
+  {
+    return false;
+  }
+
+  cellMinMV = 5000;
+  cellMaxMV = 0;
+
+  for (uint8_t i = 0; i < detectedCellCount; i++)
+  {
+    uint16_t index =
+      detectedCellStart + i * 2;
+
+    uint16_t mv =
+      ((uint16_t)data[index + 1] << 8) |
+      data[index];
+
+    cellMV[i] = mv;
+
+    if (mv < cellMinMV)
+    {
+      cellMinMV = mv;
+    }
+
+    if (mv > cellMaxMV)
+    {
+      cellMaxMV = mv;
+    }
+  }
+
+  cellDeltaMV = cellMaxMV - cellMinMV;
+
+  return true;
+}
+
+void MoveBMSGauge::checkCellFault()
+{
+  cellWarn = false;
+  cellFault = false;
+
+  if (cellDeltaMV >= CELL_WARN_DELTA_MV)
+  {
+    cellWarn = true;
+  }
+
+  if (cellDeltaMV >= CELL_FAULT_DELTA_MV)
+  {
+    cellFault = true;
+  }
+
+  if (cellMinMV <= CELL_LOW_FAULT_MV)
+  {
+    cellFault = true;
+  }
+}
+
+void MoveBMSGauge::printCellInfo()
+{
+  Serial.println("====== CELL INFO ======");
+
+  Serial.print("Detected Cell Start = ");
+  Serial.println(detectedCellStart);
+
+  Serial.print("Detected Cell Count = ");
+  Serial.println(detectedCellCount);
+
+  for (uint8_t i = 0; i < detectedCellCount; i++)
+  {
+    Serial.print("Cell ");
+    Serial.print(i + 1);
+    Serial.print(" = ");
+    Serial.print(cellMV[i]);
+    Serial.println(" mV");
+  }
+
+  Serial.print("Cell Min = ");
+  Serial.print(cellMinMV);
+  Serial.println(" mV");
+
+  Serial.print("Cell Max = ");
+  Serial.print(cellMaxMV);
+  Serial.println(" mV");
+
+  Serial.print("Cell Delta = ");
+  Serial.print(cellDeltaMV);
+  Serial.println(" mV");
+
+  if (cellFault)
+  {
+    Serial.println("PIN LOI: LECH CELL / CELL QUA THAP");
+  }
+  else if (cellWarn)
+  {
+    Serial.println("CANH BAO: LECH CELL");
+  }
+
+  Serial.println("=======================");
+}
+
 void MoveBMSGauge::notifyCallback(
   BLERemoteCharacteristic* c,
   uint8_t* data,
@@ -180,22 +367,64 @@ void MoveBMSGauge::notifyCallback(
   bool isNotify
 )
 {
-  if (instance == nullptr) return;
+  if (instance == nullptr)
+  {
+    return;
+  }
 
-  if (len <= instance->vehicle.socIndex) return;
+  instance->printRawPacket(data, len);
 
-  // kiểm tra packet đầu
-  if (data[0] != 0xA5) return;
+  if (len <= instance->vehicle.socIndex)
+  {
+    return;
+  }
 
-  // kiểm tra packet cuối
-  if (data[len - 1] != 0x0D) return;
+  if (data[0] != 0xA5)
+  {
+    return;
+  }
+
+  if (data[len - 1] != 0x0D)
+  {
+    return;
+  }
 
   uint8_t socRaw =
     data[instance->vehicle.socIndex];
 
-  if (socRaw > 100) return;
+  if (socRaw > 100)
+  {
+    return;
+  }
 
-  // lọc SOC chống nhảy
+  bool hasCells =
+    instance->autoDetectCells(data, len);
+
+  if (hasCells)
+  {
+    hasCells =
+      instance->readDetectedCells(data, len);
+  }
+
+  if (hasCells)
+  {
+    instance->checkCellFault();
+    instance->printCellInfo();
+
+    if (instance->cellFault)
+    {
+      instance->lastPacketTime = millis();
+
+      instance->outputCellFault();
+
+      return;
+    }
+  }
+  else
+  {
+    Serial.println("No valid cell data in this packet");
+  }
+
   if (instance->socFiltered < 0)
   {
     instance->socFiltered = socRaw;
@@ -207,24 +436,34 @@ void MoveBMSGauge::notifyCallback(
       socRaw * 0.10;
   }
 
+  uint8_t socDisplay =
+    (uint8_t)(instance->socFiltered + 0.5);
+
+  if (
+    instance->cellWarn &&
+    socDisplay > 30
+  )
+  {
+    socDisplay = 30;
+  }
+
   instance->lastPacketTime = millis();
 
-  instance->outputDAC(
-    (uint8_t)instance->socFiltered
-  );
+  instance->outputDAC(socDisplay);
 }
 
 void MoveBMSGauge::outputDAC(uint8_t soc)
 {
   soc = constrain(soc, 0, 100);
 
-  int dacValue = map(
-    soc,
-    0,
-    100,
-    vehicle.dacMin,
-    vehicle.dacMax
-  );
+  int dacValue =
+    map(
+      soc,
+      0,
+      100,
+      vehicle.dacMin,
+      vehicle.dacMax
+    );
 
   dacWrite(DAC_PIN, dacValue);
 
@@ -244,14 +483,29 @@ void MoveBMSGauge::outputDAC(uint8_t soc)
   );
 }
 
+void MoveBMSGauge::outputCellFault()
+{
+  dacWrite(DAC_PIN, vehicle.dacMin);
+
+  Serial.print("PIN LOI - DAC MIN=");
+  Serial.print(vehicle.dacMin);
+
+  Serial.print("  Delta=");
+  Serial.print(cellDeltaMV);
+
+  Serial.print("mV  CellMin=");
+  Serial.print(cellMinMV);
+
+  Serial.print("mV  CellCount=");
+  Serial.println(detectedCellCount);
+}
+
 void MoveBMSGauge::loop()
 {
-  // mất BLE
   if (pClient && !pClient->isConnected())
   {
     Serial.println("Disconnected");
 
-    // fail-safe
     dacWrite(DAC_PIN, vehicle.dacMin);
 
     delay(2000);
@@ -259,7 +513,6 @@ void MoveBMSGauge::loop()
     connectBMS();
   }
 
-  // timeout không có packet
   if (
     lastPacketTime > 0 &&
     millis() - lastPacketTime > 5000
@@ -267,7 +520,6 @@ void MoveBMSGauge::loop()
   {
     Serial.println("No BMS data timeout");
 
-    // fail-safe
     dacWrite(DAC_PIN, vehicle.dacMin);
 
     lastPacketTime = 0;

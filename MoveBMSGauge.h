@@ -30,16 +30,24 @@ private:
   BLERemoteCharacteristic* pChar;
 
   const char* addr;
+
   VehicleConfig vehicle;
 
   BLEUUID serviceUUID;
   BLEUUID charUUID;
 
+  float socFiltered;
+
+  unsigned long lastPacketTime;
+
   bool loadVehicleConfig(const char* vehicleName);
+
   bool connectBMS();
+
   void outputDAC(uint8_t soc);
 
   static MoveBMSGauge* instance;
+
   static void notifyCallback(
     BLERemoteCharacteristic* c,
     uint8_t* data,
